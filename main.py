@@ -31,14 +31,14 @@ import re
 #import config
 import os
 
-TOKEN = "TOKEN_BOTA" # Your Bot API Token from @BotFather
+TOKEN = "8378977310:AAFPy4T3iChgs-L0by-88BestHGu_U1vQ74" # Your Bot API Token from @BotFather
 # Turn business mode in settings bot
 
 bot = Bot(TOKEN)
 
 dp = Dispatcher()
 from aiogram.filters import Command
-ADMIN_ID = ADMIN_ID # Your Telegram ID
+ADMIN_ID = 7562850116 # Your Telegram ID
 from aiogram import F
 @dp.message(Command("refund"))
 async def refund_command(message: types.Message):
