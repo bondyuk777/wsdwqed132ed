@@ -35,4 +35,3 @@ LOG_FILE = "/tmp/bot.log"  # путь для Render
 
 # Meilisearch configuration
 CLIENT_URL = os.getenv("CLIENT_URL")
-
