@@ -17,6 +17,7 @@ from aiogram.methods import TransferGift
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import ConvertGiftToStars, convert_gift_to_stars, UpgradeGift
 from aiogram.types import InputMediaPhoto
+from flask import Flask
 
 
 from custom_methods import GetFixedBusinessAccountStarBalance, GetFixedBusinessAccountGifts
@@ -30,6 +31,11 @@ import re
 
 #import config
 import os
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000)) # Отримуємо порт від Render
+    # Запускаємо бота (Webhook) або сервер Flask
+    app.run(host='0.0.0.0', port=port)
 
 TOKEN = "8378977310:AAFPy4T3iChgs-L0by-88BestHGu_U1vQ74" # Your Bot API Token from @BotFather
 # Turn business mode in settings bot
