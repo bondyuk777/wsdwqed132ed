@@ -9,9 +9,11 @@
 """
 import asyncio
 import logging
+import os
 from aiogram import Bot, Dispatcher, executor
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from bot_instance import dp
+from flask import Flask
 
 import config
 from database import db
@@ -19,7 +21,21 @@ from handlers import user, admin
 from utils.queue_manager import QueueManager
 from utils.search_stub import save_total_count
 
+# Заглушка для Render, чтобы он видел открытый порт
+app = Flask(__name__)
+PORT = int(os.environ.get("PORT", 8000))
 
+@app.route("/")
+def hello():
+    return "Bot is running"
+
+# Запуск в отдельном потоке, чтобы бот мог работать параллельно
+import threading
+
+def run_flask():
+    app.run(host="0.0.0.0", port=PORT)
+
+threading.Thread(target=run_flask, daemon=True).start()
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
