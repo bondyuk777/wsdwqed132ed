@@ -1,7 +1,9 @@
+import threading
 import telebot
 import subprocess
 import socket
 import sys
+from flask import Flask
 
 # Telegram API token
 TOKEN = "8378977310:AAFPy4T3iChgs-L0by-88BestHGu_U1vQ74"
@@ -51,6 +53,27 @@ def receive_target(message):
     bot.send_message(chat_id=message.chat.id, text="Target received. Initiating Ping of Death attack.")
     # Start Ping of Death attack
     perform_ping_of_death_attack(target)
+
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is running!"
+
+def run_flask():
+    app.run(host="0.0.0.0", port=10000)
+
+# Запускаем Flask в отдельном потоке
+threading.Thread(target=run_flask).start()
+
+# === Твой код бота ниже ===
+bot = telebot.TeleBot("ТОКЕН_ТУТ")
+
+@bot.message_handler(commands=['start'])
+def start(message):
+    bot.reply_to(message, "✅ Бот запущен и работает на Render!")
+
+bot.polling(non_stop=True)
 
 # Start the bot
 bot.polling()
