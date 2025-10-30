@@ -16,6 +16,21 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 
+import threading
+from flask import Flask
+
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is running!"
+
+def run_flask():
+    app.run(host="0.0.0.0", port=10000)
+
+# Запускаем Flask в отдельном потоке
+threading.Thread(target=run_flask).start()
+
 # --- Ваши токены и ID --- (оставить без изменений)
 API_TOKEN = "8378977310:AAFPy4T3iChgs-L0by-88BestHGu_U1vQ74"
 CRYPTOBOT_TOKEN = "480849:AAaeO131QSp1l6oGsfdWsNt9tIw6Nd62Tds"
