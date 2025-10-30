@@ -1,0 +1,7 @@
+/.DS_Store
+/.env
+/__pycache__
+/bot.log
+/bot_database.db
+/develop
+/venv
