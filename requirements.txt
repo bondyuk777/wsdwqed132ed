@@ -1,5 +1,0 @@
-aiogram
-aiohttp
-flask
-fpdf2
-reportlab
