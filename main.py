@@ -1,4 +1,4 @@
-from aiogram import F
+from aiogram.filters import F
 from aiogram import Bot, Dispatcher
 from aiogram import types
 import asyncio
