@@ -3,8 +3,11 @@ import re
 import logging
 import socket
 import struct
+import time
+
 from telegram import Update
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+from telegram.error import TimedOut
 from dotenv import load_dotenv
 
 # Настройка логирования
@@ -18,12 +21,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Локально можно использовать .env, на Render это не мешает
 load_dotenv()
+
+# На Render нужно создать переменную окружения TELEGRAM_BOT_TOKEN
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 CHANNEL_ID = os.getenv('TELEGRAM_CHANNEL_ID')
-SERVER_IP = 'Ваш ип' #Сюда вписать ип адрес пример: 00.00.00.00
-SERVER_PORT = 27015 #Сюда вписать ваш порт, пример 27015
-UPDATE_INTERVAL = 3000 #интервал автоотправки сообщения в ваш канал
+
+SERVER_IP = 'Ваш ип'  # Сюда вписать ип адрес пример: 00.00.00.00
+SERVER_PORT = 27015   # Сюда вписать ваш порт, пример 27015
+UPDATE_INTERVAL = 3000  # интервал автоотправки сообщения в ваш канал (в секундах)
+
 
 class SourceServerQuery:
     last_response = None
@@ -73,7 +81,7 @@ class SourceServerQuery:
                 info['map'], data = SourceServerQuery.decode_string(data)
                 data = data[16:]
                 info['version'], data = SourceServerQuery.decode_string(data)
-                
+
                 return {
                     'name': SourceServerQuery.remove_color_codes(info['name']),
                     'map': SourceServerQuery.remove_color_codes(info['map']),
@@ -125,10 +133,11 @@ class SourceServerQuery:
             logger.error(f"Ошибка запроса игроков: {str(e)}")
             return None
 
+
 def generate_message(check_changes=True):
     try:
         current_data = (SourceServerQuery.get_info(), SourceServerQuery.get_players())
-        
+
         if check_changes and current_data == SourceServerQuery.last_response:
             return None
 
@@ -156,6 +165,7 @@ def generate_message(check_changes=True):
         logger.error(f"Ошибка генерации сообщения: {str(e)}")
         return "⚠️ Ошибка получения данных"
 
+
 def send_update(context: CallbackContext):
     try:
         message = generate_message(check_changes=True)
@@ -168,11 +178,12 @@ def send_update(context: CallbackContext):
     except Exception as e:
         logger.error(f"Ошибка отправки: {str(e)}")
 
+
 def handle_server_cmd(update: Update, context: CallbackContext):
     try:
         info = SourceServerQuery.get_info()
         players = SourceServerQuery.get_players()
-        
+
         if not info or not players:
             update.message.reply_text("❌ Сервер не отвечает", parse_mode='HTML')
             return
@@ -198,6 +209,7 @@ def handle_server_cmd(update: Update, context: CallbackContext):
         logger.error(f"Ошибка команды: {str(e)}")
         update.message.reply_text("⚠️ Ошибка при получении данных", parse_mode='HTML')
 
+
 def start(update: Update, context: CallbackContext):
     update.message.reply_text(
         "🤖 Бот мониторинга игрового сервера\n"
@@ -205,30 +217,65 @@ def start(update: Update, context: CallbackContext):
         parse_mode='HTML'
     )
 
+
 def main():
-    try:
-        updater = Updater(TOKEN, use_context=True)
-        dp = updater.dispatcher
-
-        dp.add_handler(CommandHandler("start", start))
-        dp.add_handler(MessageHandler(
-            Filters.text & ~Filters.command & Filters.regex(r'^!сервер'),
-            handle_server_cmd
-        ))
-
-        updater.job_queue.run_repeating(
-            send_update,
-            interval=UPDATE_INTERVAL,
-            first=0
+    if not TOKEN:
+        logger.critical(
+            "Переменная окружения TELEGRAM_BOT_TOKEN не задана. "
+            "Укажи токен бота в настройках Render (Environment / Env Vars)."
         )
+        return
 
-        logger.info("Бот успешно запущен")
-        updater.start_polling()
-        updater.idle()
+    if not CHANNEL_ID:
+        logger.critical(
+            "Переменная окружения TELEGRAM_CHANNEL_ID не задана. "
+            "Укажи ID канала в настройках Render (Environment / Env Vars)."
+        )
+        return
 
-    except Exception as e:
-        logger.critical(f"Критическая ошибка: {str(e)}")
-        raise
+    # Таймауты для запросов к Telegram (важно для Render)
+    request_kwargs = {
+        'read_timeout': 30,
+        'connect_timeout': 10,
+    }
+
+    # Цикл автоперезапуска при проблемах с соединением
+    while True:
+        try:
+            updater = Updater(
+                TOKEN,
+                use_context=True,
+                request_kwargs=request_kwargs
+            )
+
+            dp = updater.dispatcher
+
+            dp.add_handler(CommandHandler("start", start))
+            dp.add_handler(MessageHandler(
+                Filters.text & ~Filters.command & Filters.regex(r'^!сервер'),
+                handle_server_cmd
+            ))
+
+            updater.job_queue.run_repeating(
+                send_update,
+                interval=UPDATE_INTERVAL,
+                first=0
+            )
+
+            logger.info("Бот успешно запущен")
+            updater.start_polling()
+            updater.idle()
+            # Если idle вернулся без ошибок — выходим из цикла
+            break
+
+        except TimedOut as e:
+            logger.warning(f"Telegram TimedOut: {e}. Повторный запуск через 5 секунд...")
+            time.sleep(5)
+
+        except Exception as e:
+            logger.critical(f"Критическая ошибка: {str(e)}", exc_info=True)
+            time.sleep(5)
+
 
 if __name__ == '__main__':
     main()
