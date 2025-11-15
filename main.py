@@ -1,16 +1,22 @@
 import os
-import re
 import logging
-import socket
-import struct
 import time
+import urllib.request
+from urllib.error import URLError, HTTPError
 
-from telegram import Update
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import (
+    Updater,
+    CommandHandler,
+    MessageHandler,
+    Filters,
+    CallbackContext,
+    ConversationHandler,
+)
 from telegram.error import TimedOut
 from dotenv import load_dotenv
 
-# Настройка логирования
+# ===== ЛОГИРОВАНИЕ =====
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
@@ -21,201 +27,197 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Локально можно использовать .env, на Render это не мешает
+# ===== НАСТРОЙКИ ОКРУЖЕНИЯ =====
 load_dotenv()
 
-# На Render нужно создать переменную окружения TELEGRAM_BOT_TOKEN
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 CHANNEL_ID = os.getenv('TELEGRAM_CHANNEL_ID')
 
-SERVER_IP = 'Ваш ип'  # Сюда вписать ип адрес пример: 00.00.00.00
-SERVER_PORT = 27015   # Сюда вписать ваш порт, пример 27015
-UPDATE_INTERVAL = 3000  # интервал автоотправки сообщения в ваш канал (в секундах)
+# URL, который мониторим (можно сменить в боте)
+SERVER_URL = "https://adadadadad-97sj.onrender.com/"
+
+# URL самого бота / сервиса на Render, чтобы он пинговал СЕБЯ
+# Пример: SELF_URL=https://adadadadad-97sj.onrender.com/
+SELF_URL = os.getenv('SELF_URL')
+
+# интервал автоотправки статуса в канал (в секундах)
+UPDATE_INTERVAL = 60  # 1 минута
+
+# состояния для ConversationHandler
+SET_SITE = 1
 
 
-class SourceServerQuery:
-    last_response = None
-    ENCODINGS = ['utf-8', 'cp1251', 'iso-8859-5', 'cp866', 'koi8-r', 'latin1']
-    HEADER = b'\xFF\xFF\xFF\xFF'
-
-    @staticmethod
-    def remove_color_codes(name):
-        return re.sub(r'\^\d', '', name).strip() if name else ''
-
-    @staticmethod
-    def decode_string(data):
-        end = data.find(b'\x00')
-        if end == -1:
-            return "", data
-        raw_bytes = data[:end]
-        remaining = data[end+1:]
-        for encoding in SourceServerQuery.ENCODINGS:
-            try:
-                decoded = raw_bytes.decode(encoding, errors='strict').strip()
-                return decoded, remaining
-            except UnicodeDecodeError:
-                continue
-        return raw_bytes.decode('utf-8', errors='replace').strip(), remaining
-
-    @staticmethod
-    def get_info():
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                sock.settimeout(5)
-                payload = SourceServerQuery.HEADER + b'T' + b'Source Engine Query\x00'
-                sock.sendto(payload, (SERVER_IP, SERVER_PORT))
-                data = sock.recv(4096)
-
-                if data[4] == 0x41:
-                    challenge = struct.unpack('<l', data[5:9])[0]
-                    payload = SourceServerQuery.HEADER + b'T' + b'Source Engine Query\x00' + struct.pack('<l', challenge)
-                    sock.sendto(payload, (SERVER_IP, SERVER_PORT))
-                    data = sock.recv(4096)
-
-                if data[4] != 0x49:
-                    return None
-
-                data = data[6:]
-                info = {}
-                info['name'], data = SourceServerQuery.decode_string(data)
-                info['map'], data = SourceServerQuery.decode_string(data)
-                data = data[16:]
-                info['version'], data = SourceServerQuery.decode_string(data)
-
-                return {
-                    'name': SourceServerQuery.remove_color_codes(info['name']),
-                    'map': SourceServerQuery.remove_color_codes(info['map']),
-                    'players': data[0] if len(data) >= 2 else 0,
-                    'max_players': data[1] if len(data) >= 2 else 0
-                }
-
-        except Exception as e:
-            logger.error(f"Ошибка запроса информации: {str(e)}")
-            return None
-
-    @staticmethod
-    def get_players():
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                sock.settimeout(5)
-                payload = SourceServerQuery.HEADER + b'U' + b'\xFF\xFF\xFF\xFF'
-                sock.sendto(payload, (SERVER_IP, SERVER_PORT))
-                data = sock.recv(4096)
-
-                if data[4] == 0x41:
-                    challenge = struct.unpack('<l', data[5:9])[0]
-                    payload = SourceServerQuery.HEADER + b'U' + struct.pack('<l', challenge)
-                    sock.sendto(payload, (SERVER_IP, SERVER_PORT))
-                    data = sock.recv(4096)
-
-                if data[4] != 0x44:
-                    return None
-
-                players = []
-                player_count = data[5]
-                data = data[6:]
-
-                for _ in range(player_count):
-                    try:
-                        data = data[1:]
-                        name, data = SourceServerQuery.decode_string(data)
-                        data = data[8:]
-                        clean_name = SourceServerQuery.remove_color_codes(name)
-                        if clean_name and clean_name != '.':
-                            players.append(clean_name)
-                    except Exception as e:
-                        logger.error(f"Ошибка парсинга игрока: {str(e)}")
-                        continue
-
-                return players
-
-        except Exception as e:
-            logger.error(f"Ошибка запроса игроков: {str(e)}")
-            return None
-
-
-def generate_message(check_changes=True):
+def check_site(url: str):
+    """Делаем HTTP-запрос к сайту и возвращаем статус + время отклика."""
     try:
-        current_data = (SourceServerQuery.get_info(), SourceServerQuery.get_players())
-
-        if check_changes and current_data == SourceServerQuery.last_response:
-            return None
-
-        SourceServerQuery.last_response = current_data
-        info, players = current_data
-
-        if not info or not players:
-            return "❌ Сервер не отвечает"
-
-        message = [
-            f"🔹 <b>{info['name']}</b>",
-            f"🗺 Карта: <code>{info['map']}</code>",
-            f"👥 Онлайн: <b>{len(players)}/32</b>",
-            "\n📊 Игроки:"
-        ]
-
-        if players:
-            message += [f"👤 {name}" for name in players]
-        else:
-            message.append("Сейчас никто не играет")
-
-        return "\n".join(message)
-
+        start = time.time()
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            status_code = resp.getcode()
+            elapsed_ms = int((time.time() - start) * 1000)
+            return {
+                "ok": True,
+                "status": status_code,
+                "elapsed": elapsed_ms,
+            }
+    except HTTPError as e:
+        elapsed_ms = int((time.time() - start) * 1000)
+        return {
+            "ok": False,
+            "status": e.code,
+            "elapsed": elapsed_ms,
+            "error": f"HTTPError: {e.code}"
+        }
+    except URLError as e:
+        return {
+            "ok": False,
+            "status": None,
+            "elapsed": None,
+            "error": f"URLError: {e.reason}"
+        }
     except Exception as e:
-        logger.error(f"Ошибка генерации сообщения: {str(e)}")
-        return "⚠️ Ошибка получения данных"
+        return {
+            "ok": False,
+            "status": None,
+            "elapsed": None,
+            "error": f"Exception: {e}"
+        }
+
+
+def generate_message() -> str:
+    """Формируем текст для канала/чата по текущему SERVER_URL."""
+    result = check_site(SERVER_URL)
+
+    if not result["ok"] and result["status"] is None:
+        # Сайт вообще не открылся
+        return (
+            f"❌ Сайт недоступен\n"
+            f"🌐 URL: <code>{SERVER_URL}</code>\n"
+            f"⚠️ Ошибка: <code>{result.get('error', 'неизвестно')}</code>"
+        )
+
+    status = result["status"]
+    elapsed = result["elapsed"]
+
+    if result["ok"]:
+        emoji = "✅"
+        status_text = "OK"
+    else:
+        emoji = "⚠️"
+        status_text = result.get("error", "Ошибка")
+
+    return (
+        f"{emoji} Статус сайта\n"
+        f"🌐 URL: <code>{SERVER_URL}</code>\n"
+        f"📡 HTTP статус: <b>{status}</b>\n"
+        f"⏱ Задержка: <b>{elapsed} мс</b>\n"
+        f"ℹ️ {status_text}"
+    )
 
 
 def send_update(context: CallbackContext):
+    """Периодическая отправка статуса в канал (каждую минуту)."""
     try:
-        message = generate_message(check_changes=True)
-        if message:
-            context.bot.send_message(
-                chat_id=CHANNEL_ID,
-                text=message,
-                parse_mode='HTML'
-            )
-    except Exception as e:
-        logger.error(f"Ошибка отправки: {str(e)}")
-
-
-def handle_server_cmd(update: Update, context: CallbackContext):
-    try:
-        info = SourceServerQuery.get_info()
-        players = SourceServerQuery.get_players()
-
-        if not info or not players:
-            update.message.reply_text("❌ Сервер не отвечает", parse_mode='HTML')
-            return
-
-        message = [
-            f"🔹 <b>{info['name']}</b>",
-            f"🗺 Карта: <code>{info['map']}</code>",
-            f"👥 Онлайн: <b>{len(players)}/32</b>",
-            "\n📊 Игроки:"
-        ]
-
-        if players:
-            message += [f"👤 {name}" for name in players]
-        else:
-            message.append("Сейчас никто не играет")
-
-        update.message.reply_text(
-            text="\n".join(message),
+        message = generate_message()
+        logger.info(f"Пинг {SERVER_URL} → отправка в канал")
+        context.bot.send_message(
+            chat_id=CHANNEL_ID,
+            text=message,
             parse_mode='HTML'
         )
-
     except Exception as e:
-        logger.error(f"Ошибка команды: {str(e)}")
-        update.message.reply_text("⚠️ Ошибка при получении данных", parse_mode='HTML')
+        logger.error(f"Ошибка отправки в канал: {e}")
+
+
+def ping_self(context: CallbackContext):
+    """Пинг самого себя (SELF_URL) каждую минуту — только в лог, без Телеги."""
+    if not SELF_URL:
+        return  # если не задан SELF_URL, просто ничего не делаем
+    try:
+        result = check_site(SELF_URL)
+        if result["ok"]:
+            logger.info(
+                f"[SELF PING] {SELF_URL} OK, "
+                f"status={result['status']}, {result['elapsed']} ms"
+            )
+        else:
+            logger.warning(
+                f"[SELF PING] {SELF_URL} FAIL, "
+                f"status={result.get('status')}, error={result.get('error')}"
+            )
+    except Exception as e:
+        logger.error(f"[SELF PING] Ошибка при пинге SELF_URL: {e}")
+
+
+def show_status(update: Update, context: CallbackContext):
+    """Показать статус сайта (по кнопке)."""
+    try:
+        message = generate_message()
+        update.message.reply_text(
+            text=message,
+            parse_mode='HTML'
+        )
+    except Exception as e:
+        logger.error(f"Ошибка показа статуса: {e}")
+        update.message.reply_text("⚠️ Ошибка при получении статуса", parse_mode='HTML')
 
 
 def start(update: Update, context: CallbackContext):
+    """Старт: показываем кнопки."""
+    keyboard = [
+        [KeyboardButton("📊 Статус сайта")],
+        [KeyboardButton("⚙️ Сменить сайт")],
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
     update.message.reply_text(
-        "🤖 Бот мониторинга игрового сервера\n"
-        "Используйте команду !сервер для проверки текущего статуса",
+        "🤖 Бот мониторинга сайта\n"
+        "Выбери действие на кнопках ниже:",
+        reply_markup=reply_markup,
         parse_mode='HTML'
     )
+
+
+def change_site_start(update: Update, context: CallbackContext):
+    """Попросить пользователя прислать новый URL."""
+    update.message.reply_text(
+        "Отправь ссылку на сайт, который нужно мониторить.\n"
+        "Например: <code>https://adadadadad-97sj.onrender.com/</code>",
+        parse_mode='HTML'
+    )
+    return SET_SITE
+
+
+def set_site_value(update: Update, context: CallbackContext):
+    """Пользователь прислал URL — сохраняем его в память."""
+    global SERVER_URL
+    text = update.message.text.strip()
+
+    # Простейшая проверка
+    if not (text.startswith("http://") or text.startswith("https://")):
+        update.message.reply_text(
+            "⚠️ Неверный формат URL.\nПример: <code>https://example.com/</code>",
+            parse_mode='HTML'
+        )
+        return SET_SITE
+
+    SERVER_URL = text
+    logger.info(f"Установлен новый URL для мониторинга: {SERVER_URL}")
+
+    update.message.reply_text(
+        f"✅ Сайт обновлён:\n<code>{SERVER_URL}</code>",
+        parse_mode='HTML'
+    )
+
+    # Покажем снова меню
+    start(update, context)
+    return ConversationHandler.END
+
+
+def cancel(update: Update, context: CallbackContext):
+    update.message.reply_text("Ок, отменено.", parse_mode='HTML')
+    start(update, context)
+    return ConversationHandler.END
 
 
 def main():
@@ -229,17 +231,21 @@ def main():
     if not CHANNEL_ID:
         logger.critical(
             "Переменная окружения TELEGRAM_CHANNEL_ID не задана. "
-            "Укажи ID канала в настройках Render (Environment / Env Vars)."
+            "Укажи ID канала/чата в настройках Render (Environment / Env Vars)."
         )
         return
 
-    # Таймауты для запросов к Telegram (важно для Render)
+    if not SELF_URL:
+        logger.warning(
+            "SELF_URL не задан. Сам себе бот пинговать не будет. "
+            "Если хочешь self-ping — добавь SELF_URL в Env Vars."
+        )
+
     request_kwargs = {
         'read_timeout': 30,
         'connect_timeout': 10,
     }
 
-    # Цикл автоперезапуска при проблемах с соединением
     while True:
         try:
             updater = Updater(
@@ -250,22 +256,58 @@ def main():
 
             dp = updater.dispatcher
 
+            # /start
             dp.add_handler(CommandHandler("start", start))
+
+            # Кнопка "📊 Статус сайта"
             dp.add_handler(MessageHandler(
-                Filters.text & ~Filters.command & Filters.regex(r'^!сервер'),
-                handle_server_cmd
+                Filters.regex(r'^📊 Статус сайта$'),
+                show_status
             ))
 
+            # Диалог смены сайта
+            conv_handler = ConversationHandler(
+                entry_points=[MessageHandler(
+                    Filters.regex(r'^⚙️ Сменить сайт$'),
+                    change_site_start
+                )],
+                states={
+                    SET_SITE: [
+                        MessageHandler(Filters.text & ~Filters.command, set_site_value)
+                    ],
+                },
+                fallbacks=[CommandHandler("cancel", cancel)],
+            )
+            dp.add_handler(conv_handler)
+
+            # Старый текстовый триггер по желанию
+            dp.add_handler(MessageHandler(
+                Filters.text & ~Filters.command & Filters.regex(r'^!сайт'),
+                show_status
+            ))
+
+            # Периодический статус в канал (каждую минуту)
             updater.job_queue.run_repeating(
                 send_update,
                 interval=UPDATE_INTERVAL,
                 first=0
             )
 
-            logger.info("Бот успешно запущен")
+            # Периодический self-ping, тоже каждую минуту
+            if SELF_URL:
+                updater.job_queue.run_repeating(
+                    ping_self,
+                    interval=60,
+                    first=0
+                )
+
+            logger.info(
+                f"Бот запущен. Мониторим: {SERVER_URL}, "
+                f"self-ping: {SELF_URL if SELF_URL else 'выключен'}, "
+                f"интервал: {UPDATE_INTERVAL} сек"
+            )
             updater.start_polling()
             updater.idle()
-            # Если idle вернулся без ошибок — выходим из цикла
             break
 
         except TimedOut as e:
@@ -273,7 +315,7 @@ def main():
             time.sleep(5)
 
         except Exception as e:
-            logger.critical(f"Критическая ошибка: {str(e)}", exc_info=True)
+            logger.critical(f"Критическая ошибка: {e}", exc_info=True)
             time.sleep(5)
 
 
